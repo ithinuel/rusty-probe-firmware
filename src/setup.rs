@@ -6,6 +6,7 @@ use core::mem::MaybeUninit;
 use embedded_hal::adc::OneShot;
 use embedded_hal::digital::v2::{InputPin, OutputPin};
 use embedded_hal::PwmPin;
+use rp2040_hal::adc::AdcPin;
 use rp2040_hal::gpio::{FunctionSioInput, FunctionSioOutput, PullDown, PullNone, PullUp};
 use rp2040_hal::{
     clocks::init_clocks_and_plls,
@@ -109,7 +110,7 @@ pub fn setup(
     let adc_pin_0 = pins.gpio26.into_floating_input();
 
     let adc = TargetVccReader {
-        pin: adc_pin_0,
+        pin: Some(adc_pin_0),
         adc,
     };
 
@@ -232,14 +233,16 @@ impl TargetPhysicallyConnected {
 }
 
 pub struct TargetVccReader {
-    pub pin: Pin<Gpio26, FunctionSioInput, PullNone>,
+    pub pin: Option<Pin<Gpio26, FunctionSioInput, PullNone>>,
     pub adc: Adc,
 }
 
 impl TargetVccReader {
     pub fn read_voltage_mv(&mut self) -> u32 {
         let Self { pin, adc } = self;
-        let val: u16 = adc.read(pin).unwrap();
+        let mut pin = AdcPin::new(pin.take().expect("Pin is available"));
+        let val: u16 = adc.read(&mut pin).unwrap();
+        self.pin = Some(pin.release());
 
         (2 * 3300 * val as u32) / 4095
     }
