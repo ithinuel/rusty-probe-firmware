@@ -23,7 +23,23 @@ use usb_device::class_prelude::UsbBusAllocator;
 
 const XOSC_CRYSTAL_FREQ: u32 = 12_000_000;
 
-pub type DapHandler = dap_rs::dap::Dap<'static, Context, HostStatusToken, Wait, Jtag, Swd, Swo>;
+pub enum DapPins {}
+impl dap::ValidDapPins for DapPins {
+    type SwDIO = Pin<Gpio10, FunctionSioOutput, PullDown>;
+    type SwCLK = Pin<Gpio11, FunctionSioOutput, PullDown>;
+    type NReset = Pin<Gpio9, FunctionSioOutput, PullUp>;
+    type DirSwDIO = Pin<Gpio12, FunctionSioOutput, PullNone>;
+    type DirSwCLK = Pin<Gpio19, FunctionSioOutput, PullNone>;
+}
+pub type DapHandler = dap_rs::dap::Dap<
+    'static,
+    Context<DapPins>,
+    HostStatusToken,
+    Wait,
+    Jtag<DapPins>,
+    Swd<DapPins>,
+    Swo,
+>;
 
 /// The linker will place this boot block at the start of our program image. We
 /// need this to help the ROM bootloader get our code up and running.
@@ -181,11 +197,11 @@ pub fn setup(
 
     let dap_hander = dap::create_dap(
         git_version,
-        io.into(),
-        ck.into(),
-        reset.into(),
-        dir_io.into(),
-        dir_ck.into(),
+        io.reconfigure(),
+        ck.reconfigure(),
+        reset.reconfigure(),
+        dir_io.reconfigure(),
+        dir_ck.reconfigure(),
         clocks.system_clock.freq().raw(),
         delay,
         host_status_token,

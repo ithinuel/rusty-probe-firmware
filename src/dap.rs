@@ -1,26 +1,54 @@
+use core::{borrow::BorrowMut, marker::PhantomData};
+
 use crate::systick_delay::Delay;
 use dap_rs::{swj::Dependencies, *};
 use defmt::trace;
-use embedded_hal::{
-    blocking::delay::DelayUs,
-    digital::v2::{InputPin, OutputPin, PinState},
-};
-use rp2040_hal::gpio::{DynFunction, DynPinId, Pin, PullNone};
+use embedded_hal::{blocking::delay::DelayUs, digital::v2::InputPin, digital::v2::PinState};
+use rp2040_hal::gpio::OutputEnableOverride;
 
-pub struct Context {
+mod private {
+    use embedded_hal::digital::v2::{InputPin, OutputPin, PinState};
+    use rp2040_hal::gpio::{AnyPin, FunctionSioOutput, PullDown, PullNone, PullUp};
+
+    pub trait UnCheckedOutput: OutputPin {
+        fn set_low(&mut self) {
+            let _ = <Self as OutputPin>::set_low(self);
+        }
+        fn set_high(&mut self) {
+            let _ = <Self as OutputPin>::set_high(self);
+        }
+        fn set_state(&mut self, state: PinState) {
+            let _ = <Self as OutputPin>::set_state(self, state);
+        }
+    }
+    impl<T> UnCheckedOutput for T where T: OutputPin {}
+
+    pub trait ValidDapPins {
+        type SwDIO: AnyPin<Function = FunctionSioOutput, Pull = PullDown> + OutputPin + InputPin;
+        type SwCLK: AnyPin<Function = FunctionSioOutput, Pull = PullDown> + OutputPin + InputPin;
+        type NReset: AnyPin<Function = FunctionSioOutput, Pull = PullUp> + OutputPin + InputPin;
+        type DirSwDIO: AnyPin<Function = FunctionSioOutput, Pull = PullNone> + OutputPin;
+        type DirSwCLK: AnyPin<Function = FunctionSioOutput, Pull = PullNone> + OutputPin;
+    }
+}
+pub use private::UnCheckedOutput;
+pub use private::ValidDapPins;
+
+pub struct Context<Pins: ValidDapPins> {
     max_frequency: u32,
     cpu_frequency: u32,
     cycles_per_us: u32,
     half_period_ticks: u32,
     delay: &'static Delay,
-    swdio: Pin<DynPinId, DynFunction, PullNone>,
-    swclk: Pin<DynPinId, DynFunction, PullNone>,
-    nreset: Pin<DynPinId, DynFunction, PullNone>,
-    dir_swdio: Pin<DynPinId, DynFunction, PullNone>,
-    dir_swclk: Pin<DynPinId, DynFunction, PullNone>,
+    swdio: Pins::SwDIO,
+    swclk: Pins::SwCLK,
+    nreset: Pins::NReset,
+    dir_swdio: Pins::DirSwDIO,
+    dir_swclk: Pins::DirSwCLK,
+    _phantom: PhantomData<Pins>,
 }
 
-impl defmt::Format for Context {
+impl<Pins: ValidDapPins> defmt::Format for Context<Pins> {
     fn format(&self, f: defmt::Formatter) {
         // format the bitfields of the register as struct fields
         defmt::write!(
@@ -34,7 +62,7 @@ impl defmt::Format for Context {
     }
 }
 
-impl core::fmt::Debug for Context {
+impl<Pins: ValidDapPins> core::fmt::Debug for Context<Pins> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Context")
             .field("max_frequency", &self.max_frequency)
@@ -45,47 +73,52 @@ impl core::fmt::Debug for Context {
     }
 }
 
-impl Context {
+impl<Pins: ValidDapPins> Context<Pins> {
     fn swdio_to_input(&mut self) {
         defmt::trace!("SWDIO -> input");
-        self.dir_swdio.set_low().ok();
-        self.swdio.into_pull_down_input();
+        self.dir_swdio.set_low();
+        self.swdio
+            .borrow_mut()
+            .set_output_enable_override(OutputEnableOverride::Disable);
     }
 
     fn swdio_to_output(&mut self) {
         defmt::trace!("SWDIO -> output");
-        self.swdio.into_push_pull_output();
-        self.swdio.set_high().ok();
-        self.dir_swdio.set_high().ok();
+        self.swdio
+            .borrow_mut()
+            .set_output_enable_override(OutputEnableOverride::Enable);
+        self.swdio.set_high();
+        self.dir_swdio.set_high();
     }
 
     fn swclk_to_input(&mut self) {
         defmt::trace!("SWCLK -> input");
-        self.dir_swclk.set_low().ok();
-        self.swclk.into_pull_down_input();
+        self.dir_swclk.set_low();
+        self.swclk
+            .borrow_mut()
+            .set_output_enable_override(OutputEnableOverride::Disable);
     }
 
     fn swclk_to_output(&mut self) {
         defmt::trace!("SWCLK -> output");
-        self.swclk.into_push_pull_output();
-        self.swclk.set_high().ok();
-        self.dir_swclk.set_high().ok();
+        self.swclk
+            .borrow_mut()
+            .set_output_enable_override(OutputEnableOverride::Enable);
+        self.swclk.set_high();
+        self.dir_swclk.set_high();
     }
 
     fn from_pins(
-        swdio: Pin<DynPinId, DynFunction, PullNone>,
-        swclk: Pin<DynPinId, DynFunction, PullNone>,
-        nreset: Pin<DynPinId, DynFunction, PullNone>,
-        mut dir_swdio: Pin<DynPinId, DynFunction, PullNone>,
-        mut dir_swclk: Pin<DynPinId, DynFunction, PullNone>,
+        swdio: Pins::SwDIO,
+        swclk: Pins::SwCLK,
+        nreset: Pins::NReset,
+        mut dir_swdio: Pins::DirSwDIO,
+        mut dir_swclk: Pins::DirSwCLK,
         cpu_frequency: u32,
         delay: &'static Delay,
     ) -> Self {
-        dir_swdio.into_push_pull_output();
-        dir_swclk.into_push_pull_output();
-
-        dir_swdio.set_low().ok();
-        dir_swclk.set_low().ok();
+        dir_swdio.set_low();
+        dir_swclk.set_low();
         defmt::trace!("SWCLK -> input");
         defmt::trace!("SWDIO -> input");
 
@@ -102,42 +135,44 @@ impl Context {
             nreset,
             dir_swdio,
             dir_swclk,
+            _phantom: PhantomData,
         }
     }
 }
 
-impl swj::Dependencies<Swd, Jtag> for Context {
+impl<Pins: ValidDapPins> swj::Dependencies<Swd<Pins>, Jtag<Pins>> for Context<Pins> {
     fn process_swj_pins(&mut self, output: swj::Pins, mask: swj::Pins, wait_us: u32) -> swj::Pins {
         if mask.contains(swj::Pins::SWCLK) {
             self.swclk_to_output();
-            self.swclk
-                .set_state(if output.contains(swj::Pins::SWCLK) {
-                    PinState::High
-                } else {
-                    PinState::Low
-                })
-                .ok();
+            self.swclk.set_state(if output.contains(swj::Pins::SWCLK) {
+                PinState::High
+            } else {
+                PinState::Low
+            });
         }
 
         if mask.contains(swj::Pins::SWDIO) {
             self.swdio_to_output();
-            self.swdio
-                .set_state(if output.contains(swj::Pins::SWDIO) {
-                    PinState::High
-                } else {
-                    PinState::Low
-                })
-                .ok();
+            self.swdio.set_state(if output.contains(swj::Pins::SWDIO) {
+                PinState::High
+            } else {
+                PinState::Low
+            });
         }
 
         if mask.contains(swj::Pins::NRESET) {
             if output.contains(swj::Pins::NRESET) {
                 // "open drain"
                 // TODO: What is really "output open drain"?
-                self.nreset.into_pull_up_input();
+                // Disables the output, letting the pull-up hold the line up.
+                self.nreset
+                    .borrow_mut()
+                    .set_output_enable_override(OutputEnableOverride::Disable);
             } else {
-                self.nreset.into_push_pull_output();
-                self.nreset.set_low().ok();
+                self.nreset.set_low();
+                self.nreset
+                    .borrow_mut()
+                    .set_output_enable_override(OutputEnableOverride::Normal);
             }
         }
 
@@ -174,13 +209,13 @@ impl swj::Dependencies<Swd, Jtag> for Context {
                 let bit = byte & 1;
                 byte >>= 1;
                 if bit != 0 {
-                    self.swdio.set_high().ok();
+                    self.swdio.set_high();
                 } else {
-                    self.swdio.set_low().ok();
+                    self.swdio.set_low();
                 }
-                self.swclk.set_low().ok();
+                self.swclk.set_low();
                 last = self.delay.delay_ticks_from_last(half_period_ticks, last);
-                self.swclk.set_high().ok();
+                self.swclk.set_high();
                 last = self.delay.delay_ticks_from_last(half_period_ticks, last);
             }
             bits -= frame_bits;
@@ -203,25 +238,27 @@ impl swj::Dependencies<Swd, Jtag> for Context {
     fn high_impedance_mode(&mut self) {
         self.swdio_to_input();
         self.swclk_to_input();
-        self.nreset.into_floating_disabled();
+        self.nreset
+            .borrow_mut()
+            .set_output_enable_override(OutputEnableOverride::Disable);
     }
 }
 
-pub struct Jtag(Context);
+pub struct Jtag<Pins: ValidDapPins>(Context<Pins>);
 
-impl From<Jtag> for Context {
-    fn from(value: Jtag) -> Self {
+impl<Pins: ValidDapPins> From<Jtag<Pins>> for Context<Pins> {
+    fn from(value: Jtag<Pins>) -> Self {
         value.0
     }
 }
 
-impl From<Context> for Jtag {
-    fn from(value: Context) -> Self {
+impl<Pins: ValidDapPins> From<Context<Pins>> for Jtag<Pins> {
+    fn from(value: Context<Pins>) -> Self {
         Self(value)
     }
 }
 
-impl jtag::Jtag<Context> for Jtag {
+impl<Pins: ValidDapPins> jtag::Jtag<Context<Pins>> for Jtag<Pins> {
     const AVAILABLE: bool = false;
 
     fn sequences(&mut self, _data: &[u8], _rxbuf: &mut [u8]) -> u32 {
@@ -233,26 +270,34 @@ impl jtag::Jtag<Context> for Jtag {
     }
 }
 
-#[derive(Debug, defmt::Format)]
-pub struct Swd(Context);
+#[derive(Debug)]
+pub struct Swd<Pins: ValidDapPins>(Context<Pins>);
+impl<Pins: ValidDapPins> defmt::Format for Swd<Pins> {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "Swd({})", self.0)
+    }
+}
 
-impl From<Swd> for Context {
-    fn from(value: Swd) -> Self {
+impl<Pins: ValidDapPins> From<Swd<Pins>> for Context<Pins> {
+    fn from(value: Swd<Pins>) -> Self {
         value.0
     }
 }
 
-impl From<Context> for Swd {
-    fn from(mut value: Context) -> Self {
+impl<Pins: ValidDapPins> From<Context<Pins>> for Swd<Pins> {
+    fn from(mut value: Context<Pins>) -> Self {
         // Maybe this should go to some `Swd::new`
         value.swdio_to_output();
         value.swclk_to_output();
-        value.nreset.into_floating_disabled();
+        value
+            .nreset
+            .borrow_mut()
+            .set_output_enable_override(OutputEnableOverride::Disable);
         Self(value)
     }
 }
 
-impl swd::Swd<Context> for Swd {
+impl<Pins: ValidDapPins> swd::Swd<Context<Pins>> for Swd<Pins> {
     const AVAILABLE: bool = true;
 
     fn read_inner(&mut self, apndp: swd::APnDP, a: swd::DPRegister) -> swd::Result<u32> {
@@ -340,7 +385,7 @@ impl swd::Swd<Context> for Swd {
     }
 }
 
-impl Swd {
+impl<Pins: ValidDapPins> Swd<Pins> {
     fn tx8(&mut self, mut data: u8) {
         self.0.swdio_to_output();
 
@@ -411,16 +456,16 @@ impl Swd {
     #[inline(always)]
     fn write_bit(&mut self, bit: u8, last: &mut u32) {
         if bit != 0 {
-            self.0.swdio.set_high().ok();
+            self.0.swdio.set_high();
         } else {
-            self.0.swdio.set_low().ok();
+            self.0.swdio.set_low();
         }
 
         let half_period_ticks = self.0.half_period_ticks;
 
-        self.0.swclk.set_low().ok();
+        self.0.swclk.set_low();
         *last = self.0.delay.delay_ticks_from_last(half_period_ticks, *last);
-        self.0.swclk.set_high().ok();
+        self.0.swclk.set_high();
         *last = self.0.delay.delay_ticks_from_last(half_period_ticks, *last);
     }
 
@@ -428,10 +473,10 @@ impl Swd {
     fn read_bit(&mut self, last: &mut u32) -> u8 {
         let half_period_ticks = self.0.half_period_ticks;
 
-        self.0.swclk.set_low().ok();
+        self.0.swclk.set_low();
         *last = self.0.delay.delay_ticks_from_last(half_period_ticks, *last);
         let bit = matches!(self.0.swdio.is_high(), Ok(true)) as u8;
-        self.0.swclk.set_high().ok();
+        self.0.swclk.set_high();
         *last = self.0.delay.delay_ticks_from_last(half_period_ticks, *last);
 
         bit
@@ -506,16 +551,16 @@ impl DelayUs<u32> for Wait {
 #[inline(always)]
 pub fn create_dap(
     version_string: &'static str,
-    swdio: Pin<DynPinId, DynFunction, PullNone>,
-    swclk: Pin<DynPinId, DynFunction, PullNone>,
-    nreset: Pin<DynPinId, DynFunction, PullNone>,
-    dir_swdio: Pin<DynPinId, DynFunction, PullNone>,
-    dir_swclk: Pin<DynPinId, DynFunction, PullNone>,
+    swdio: <crate::setup::DapPins as ValidDapPins>::SwDIO,
+    swclk: <crate::setup::DapPins as ValidDapPins>::SwCLK,
+    nreset: <crate::setup::DapPins as ValidDapPins>::NReset,
+    dir_swdio: <crate::setup::DapPins as ValidDapPins>::DirSwDIO,
+    dir_swclk: <crate::setup::DapPins as ValidDapPins>::DirSwCLK,
     cpu_frequency: u32,
     delay: &'static Delay,
     leds: crate::leds::HostStatusToken,
 ) -> crate::setup::DapHandler {
-    let context = Context::from_pins(
+    let context = Context::<crate::setup::DapPins>::from_pins(
         swdio,
         swclk,
         nreset,
